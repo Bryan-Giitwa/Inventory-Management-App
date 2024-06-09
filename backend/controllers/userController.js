@@ -2,6 +2,9 @@ const asyncHandler = require("express-async-handler");
 const User = require("../models/userModel"); //user model
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcrypt");
+const Token = require("../models/tokenModel");
+const crypto = require("crypto");
+const sendEmail = require("../utils/sendEmail");
 
 //GENERATE A WEB JSON TOKEN(JWT)
 const generateToken = (id) => {
@@ -186,9 +189,130 @@ const updateUser = asyncHandler(async (req, res) => {
 
 //CHANGE PASSWORD
 const changePassword = asyncHandler(async (req, res) => {
-  res.send("CHANGE PASSWORD ");
+  // Find the user by ID and explicitly include the password field
+  const user = await User.findById(req.user._id).select("+password");
+  const { currentPassword, newPassword } = req.body;
+  //check if user exists
+  if (!user) {
+    res.status(400);
+    throw new Error("User not found, please signup");
+  }
+
+  //check if user has submitted password
+  if (!currentPassword || !newPassword) {
+    res.status(400);
+    throw new Error("Please add current password and new password");
+  }
+
+  //check if current password is correct
+  const passwordIsCorrect = await bcrypt.compare(
+    currentPassword,
+    user.password
+  );
+  if (user && passwordIsCorrect) {
+    user.password = newPassword;
+    await user.save();
+    res.status(200).send("Password change successful");
+  } else {
+    res.status(400);
+    throw new Error("Current password is incorrect");
+  }
 });
 
+//FORGOT PASSWORD AND SEND EMAIL
+const forgotPassword = asyncHandler(async (req, res) => {
+  //Destructure email from the request body
+  const { email } = req.body;
+
+  //check if email is in database
+  const user = await User.findOne({ email });
+  if (!user) {
+    res.status(404);
+    throw new Error("User does not exist");
+  }
+
+  //Delete token if exist
+  let token = await Token.findOne({ userId: user._id });
+  if (token) {
+    await token.deleteOne();
+  }
+
+  //create reset token
+  let resetToken = crypto.randomBytes(32).toString("hex") + user._id;
+  console.log(resetToken); //console the generated token
+
+  //hash the token
+  const hashedToken = crypto
+    .createHash("sha256")
+    .update(resetToken) //Hash the reset token
+    .digest("hex");
+  // console.log(hashedToken); //console the generated hashed token
+
+  //save hashed token in database
+  await Token.create({
+    userId: user._id,
+    token: hashedToken,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + 30 * (60 * 1000), //Token will expire 30 min from current time
+  });
+
+  //construct reset url
+  const resetUrl = `${process.env.FRONTEND_URL}/resetpassword/${resetToken}`;
+
+  //Reset Email
+  const message = `
+  <h2>Hello ${user.name}</h2>
+  <p>Please use the link below to reset your password</p>
+  <p>This reset link is valid for only 30 minutes</p>
+  <a href=${resetUrl} clicktracking=off>${resetUrl}</a>
+  <p>Regards...</p>
+  <h5>Inventory Management Team</h5>
+  `;
+
+  const subject = "Password Reset Request";
+  const send_to = user.email;
+  const from_email = process.env.EMAIL_USER;
+
+  try {
+    await sendEmail(subject, message, send_to, from_email);
+    res.status(200).json({ success: true, message: "Reset Email Sent" });
+  } catch (error) {
+    res.status(500);
+    throw new Error("Email not sent, please try again");
+  }
+});
+
+//RESET PASSWORD
+const resetPassword = asyncHandler(async (req, res) => {
+  //Destructure token and Password
+  const { Password } = req.body;
+  const { resetToken } = req.params;
+
+  //Hash token, then compare to Token in DB
+  const hashedToken = crypto
+    .createHash("sha256")
+    .update(resetToken)
+    .digest("hex");
+
+  //find token in DB
+  const userToken = await Token.findOne({
+    token: hashedToken,
+    expiresAt: { $gt: Date.now() }, //check if greater than current time
+  });
+
+  if (!userToken) {
+    res.status(400);
+    throw new Error("Invalid or Expired token, please try again");
+  }
+  //find user in DB
+  const user = await User.findById(userToken.userId);
+  user.password = Password;
+  await user.save();
+  res.status(200).json({
+    success: true,
+    message: "Password reset successful please Login",
+  });
+});
 module.exports = {
   registerUser,
   loginUser,
@@ -197,4 +321,6 @@ module.exports = {
   loginStatus,
   updateUser,
   changePassword,
+  forgotPassword,
+  resetPassword,
 };
