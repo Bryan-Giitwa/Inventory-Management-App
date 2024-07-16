@@ -42,6 +42,7 @@ const registerUser = asyncHandler(async (req, res) => {
 
   //Generate token and assign to the user
   const token = generateToken(user._id);
+
   //Send the token as HTTP-only-Cookie
   res.cookie("token", token, {
     path: "/",
